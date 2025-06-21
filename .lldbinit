@@ -1,0 +1,22 @@
+# LLDB initialization file for Dart JIT debugging
+# This file is automatically loaded when LLDB starts in this directory
+
+# Try to locate the plugin and script in different possible locations
+script import os; import sys; from pathlib import Path
+
+# First try relative to current directory (for source tree)
+script plugin_path = Path('./build/lib/libDartJITPlugin.so')
+script script_path = Path('./dart-lldb.py')
+
+# If not found, try installed locations
+script if not plugin_path.exists(): plugin_path = Path('/usr/local/lib/libDartJITPlugin.so')
+script if not script_path.exists(): script_path = Path('/usr/local/bin/dart-lldb.py')
+
+# Load the plugin and script if found
+script if plugin_path.exists(): lldb.debugger.HandleCommand(f'plugin load "{plugin_path}"')
+script if script_path.exists(): lldb.debugger.HandleCommand(f'command script import "{script_path}"')
+
+# Setup message
+script print(f"Dart JIT debugging tools {'loaded' if plugin_path.exists() and script_path.exists() else 'not found'}.")
+script if plugin_path.exists() and script_path.exists(): print("Use 'dart-jit-setup' to initialize JIT debugging.")
+script if not plugin_path.exists() or not script_path.exists(): print("Please check installation or build the plugin first.")

@@ -67,3 +67,5 @@ Once the plugin is loaded, you can use these commands:
 ## Integration with Dart VM
 
 This plugin works with Dart's JIT compiler. The Dart VM must be compiled with GDB JIT interface support and run with the `--gdb-jit-interface` flag.
+
+TODO: Add patch for Dart project here, that introduces `--gdb-jit-interface`.

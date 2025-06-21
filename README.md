@@ -43,8 +43,6 @@ This will install the plugin to `/usr/local/lib` and the dart-lldb script to `/u
 
 ## Usage
 
-### 1. QEMU Setup
-
 1. Start Dart under QEMU with gdbserver mode:
 
 ```bash

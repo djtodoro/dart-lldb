@@ -2,27 +2,7 @@
 // DartJITPlugin.cpp - LLDB plugin for Dart JIT debugging
 //
 
-#include <lldb/API/SBAddress.h>
-#include <lldb/API/SBCommandInterpreter.h>
-#include <lldb/API/SBCommandReturnObject.h>
-#include <lldb/API/SBDebugger.h>
-#include <lldb/API/SBFrame.h>
-#include <lldb/API/SBTarget.h>
-#include <lldb/API/SBThread.h>
-#include <lldb/API/SBValue.h>
-#include <lldb/API/SBProcess.h>
-#include <lldb/API/SBBreakpoint.h>
-#include <lldb/API/SBBreakpointLocation.h>
-#include <lldb/API/SBModule.h>
-#include <lldb/API/SBSymbol.h>
-#include <lldb/API/SBSymbolContext.h>
-#include <lldb/API/SBStringList.h>
-#include <lldb/API/SBError.h>
-#include <lldb/API/SBListener.h>
-#include <lldb/API/SBEvent.h>
-#include <lldb/API/SBStream.h>
-#include <lldb/API/SBFileSpec.h>
-#include <lldb/API/SBData.h>
+#include "DartJITPlugin.h"
 
 #include <fstream>
 #include <iostream>
@@ -41,13 +21,6 @@ static std::mutex g_jit_mutex;
 static std::unordered_map<uint64_t, std::string> g_jit_functions;
 static std::unordered_map<uint64_t, std::string> g_jit_files;
 static std::unordered_map<uint64_t, uint64_t> g_jit_sizes;
-
-// Forward declarations
-static bool ParseYAMLDebugInfo(const std::string& yaml, 
-                             uint64_t& addr, 
-                             uint64_t& size, 
-                             std::string& name, 
-                             std::string& file);
 
 // Command to list all JIT-compiled functions
 class DartJITListCommand : public SBCommandPluginInterface {
@@ -224,11 +197,11 @@ public:
 };
 
 // Parse YAML debug info produced by the Dart VM
-static bool ParseYAMLDebugInfo(const std::string& yaml, 
-                             uint64_t& addr, 
-                             uint64_t& size, 
-                             std::string& name, 
-                             std::string& file) {
+bool ParseYAMLDebugInfo(const std::string& yaml, 
+                       uint64_t& addr, 
+                       uint64_t& size, 
+                       std::string& name, 
+                       std::string& file) {
   // Default values
   addr = 0;
   size = 0;
@@ -274,10 +247,10 @@ static bool ParseYAMLDebugInfo(const std::string& yaml,
 }
 
 // Breakpoint callback for monitoring JIT code registrations
-static bool BreakpointCallback(void* baton, 
-                              SBProcess& process,
-                              SBThread& thread, 
-                              lldb::SBBreakpointLocation& location) {
+bool BreakpointCallback(void* baton, 
+                       SBProcess& process,
+                       SBThread& thread, 
+                       lldb::SBBreakpointLocation& location) {
   // This is called when we hit __jit_debug_register_code
   
   // Find the __jit_debug_descriptor symbol to get the JIT entry

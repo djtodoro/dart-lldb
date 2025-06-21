@@ -4,6 +4,11 @@ project(DartJITPlugin)
 # Set position independent code
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Set project directories
+set(PROJECT_SRC_DIR "${CMAKE_SOURCE_DIR}/src")
+set(PROJECT_SCRIPTS_DIR "${CMAKE_SOURCE_DIR}/scripts")
+set(PROJECT_PYTHON_DIR "${CMAKE_SOURCE_DIR}/python")
+
 # Find LLDB-19 libraries specifically
 find_library(LLDB_LIBRARY
     NAMES lldb-19 lldb19 liblldb-19 liblldb-19.so liblldb-19.1 liblldb.so.19 liblldb.so.19.1
@@ -46,6 +51,7 @@ endif()
 
 # Include directories - prioritize LLDB-19 include paths
 include_directories(
+    ${PROJECT_SRC_DIR}
     /usr/lib/llvm-19/include/lldb
     /usr/include/lldb-19
     /usr/include/lldb
@@ -59,7 +65,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Build the plugin as a shared library
 add_library(DartJITPlugin SHARED
-    DartJITPlugin.cpp
+    ${PROJECT_SRC_DIR}/DartJITPlugin.cpp
 )
 
 # Link against LLDB
@@ -99,15 +105,22 @@ install(TARGETS DartJITPlugin
     RUNTIME DESTINATION bin
 )
 
-# Copy Python modules to build directory
+# Copy scripts and Python modules to build directory
 add_custom_target(copy_dartLLDB_scripts ALL
+  # Create directories
   COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/bin"
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/lib/dart_lldb"
+  
+  # Copy main script
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${CMAKE_SOURCE_DIR}/dart-lldb.sh" "${CMAKE_BINARY_DIR}/bin/dart-lldb"
+    "${PROJECT_SCRIPTS_DIR}/dart-lldb.sh" "${CMAKE_BINARY_DIR}/bin/dart-lldb"
+  
+  # Copy Python modules
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${CMAKE_SOURCE_DIR}/dart_lldb_init.py" "${CMAKE_BINARY_DIR}/bin/dart_lldb_init.py"
+    "${PROJECT_PYTHON_DIR}/dart_lldb_init.py" "${CMAKE_BINARY_DIR}/bin/dart_lldb_init.py"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${CMAKE_SOURCE_DIR}/__init__.py" "${CMAKE_BINARY_DIR}/__init__.py"
+    "${PROJECT_PYTHON_DIR}/__init__.py" "${CMAKE_BINARY_DIR}/lib/dart_lldb/__init__.py"
+  
   COMMENT "Copying dart-lldb scripts and Python modules into build directory"
 )
 
@@ -115,31 +128,22 @@ add_dependencies(copy_dartLLDB_scripts DartJITPlugin)
 
 # Install main script as executable
 install(PROGRAMS
-  "${CMAKE_SOURCE_DIR}/dart-lldb.sh"
+  "${PROJECT_SCRIPTS_DIR}/dart-lldb.sh"
   DESTINATION bin
   RENAME dart-lldb
 )
 
 # Install Python modules
 install(FILES
-  "${CMAKE_SOURCE_DIR}/dart_lldb_init.py"
+  "${PROJECT_PYTHON_DIR}/dart_lldb_init.py"
   DESTINATION bin
 )
 
+# Install Python package
 install(FILES
-  "${CMAKE_SOURCE_DIR}/__init__.py"
+  "${PROJECT_PYTHON_DIR}/__init__.py"
   DESTINATION lib/dart_lldb
 )
-
-# Create Python package directory in installation
-install(CODE "
-  file(MAKE_DIRECTORY \"\${CMAKE_INSTALL_PREFIX}/lib/dart_lldb\")
-  configure_file(
-    \"${CMAKE_SOURCE_DIR}/__init__.py\"
-    \"\${CMAKE_INSTALL_PREFIX}/lib/dart_lldb/__init__.py\"
-    COPYONLY
-  )
-")
 
 # Install version info
 install(FILES

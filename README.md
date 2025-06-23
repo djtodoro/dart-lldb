@@ -43,6 +43,14 @@ This will install the plugin to `/usr/local/lib` and the dart-lldb script to `/u
 
 ## Usage
 
+### Local
+
+```bash
+$ dart-lldb --pending-breakpoints 'RunningIsolates.isolateShutdown;RemovingTransformer.transformNamedExpressionList;InterfaceType.get_hasNonObjectMemberAccess' ./out/DebugX64/dart --gdb-jit-interface basic.dart
+```
+
+### Remote
+
 1. Start Dart under QEMU with gdbserver mode:
 
 ```bash

@@ -9,6 +9,14 @@ import os
 import lldb
 import re
 import yaml
+import threading
+import time
+
+# Global variables for pending breakpoints
+pending_breakpoints = []
+monitoring_enabled = False
+monitor_thread = None
+bp_handler = None
 
 def __lldb_init_module(debugger, internal_dict):
     """
@@ -22,12 +30,15 @@ def __lldb_init_module(debugger, internal_dict):
     debugger.HandleCommand("settings set prompt 'dart-lldb> '")
     debugger.GetCommandInterpreter().HandleCommand("help dart_jit_setup", result)
     if not result.Succeeded():
-        debugger.HandleCommand('command script add -f dart_lldb_init.dart_jit_setup dart_jit_setup --overwrite')
+        module_name = __name__
+        debugger.HandleCommand(f'command script add -f {module_name}.dart_jit_setup dart_jit_setup --overwrite')
     
-    # Add our custom commands
-    debugger.HandleCommand('command script add -f dart_lldb_init.cmd_dart_jit_list "dart-jit list" --overwrite')
-    debugger.HandleCommand('command script add -f dart_lldb_init.cmd_dart_jit_break "dart-jit break" --overwrite')
-    debugger.HandleCommand('command script add -f dart_lldb_init.cmd_dart_jit_help "dart-jit help" --overwrite')
+    # Add our custom commands using the current module reference
+    module_name = __name__
+    debugger.HandleCommand(f'command script add -f {module_name}.cmd_dart_jit_list "dart-jit list" --overwrite')
+    debugger.HandleCommand(f'command script add -f {module_name}.cmd_dart_jit_break "dart-jit break" --overwrite')
+    debugger.HandleCommand(f'command script add -f {module_name}.cmd_dart_jit_help "dart-jit help" --overwrite')
+    debugger.HandleCommand(f'command script add -f {module_name}.cmd_dart_jit_pending "dart-jit pending" --overwrite')
     
     # Show help text
     print("""
@@ -36,6 +47,7 @@ Dart JIT Debugging Commands:
 dart_jit_setup   - Initialize JIT debugging for current target
 dart-jit list    - List all JIT-compiled functions
 dart-jit break   - Set a breakpoint in a JIT-compiled function
+dart-jit pending - Set a pending breakpoint for a future JIT function
 dart-jit help    - Show this help message
 
 Usage Example:
@@ -48,10 +60,127 @@ Remote Debugging Example:
   $ dart-lldb --remote localhost:1234 --sysroot /path/to/sysroot out/DebugXARM/dart
 """)
 
+def monitor_for_new_functions(debugger):
+    """
+    Background thread to monitor for new JIT functions
+    """
+    global monitoring_enabled, pending_breakpoints
+    
+    print("\n==== Starting JIT function monitoring thread ====")
+    
+    # Keep a reference to the debugger
+    if not debugger:
+        print("ERROR: No debugger provided to monitor thread")
+        return
+    
+    try:
+        # Initial delay to let the program start
+        time.sleep(2.0)
+        
+        last_check_time = time.time()
+        last_entry_count = 0
+        
+        while monitoring_enabled:
+            try:
+                # Sleep briefly to avoid high CPU usage
+                time.sleep(0.5)
+                
+                # Only check periodically (every 1 second)
+                current_time = time.time()
+                if current_time - last_check_time < 1.0:
+                    continue
+                    
+                last_check_time = current_time
+                
+                # Get the current target
+                target = debugger.GetSelectedTarget()
+                if not target or not target.IsValid():
+                    continue
+                
+                # Get the process
+                process = target.GetProcess()
+                if not process or not process.IsValid():
+                    continue
+                
+                # Skip if process isn't in a good state for debugging
+                state = process.GetState()
+                if state != lldb.eStateStopped and state != lldb.eStateRunning:
+                    continue
+                
+                # Try to get JIT entries
+                entries = get_jit_entries(process)
+                if not entries:
+                    continue
+                    
+                # Check if we have new entries
+                if len(entries) <= last_entry_count:
+                    continue
+                
+                # We have new entries!
+                print(f"\n==== MONITOR: Found {len(entries) - last_entry_count} new JIT functions ====")
+                new_entries = entries[last_entry_count:]
+                last_entry_count = len(entries)
+                
+                # Check if we have any pending breakpoints
+                if not pending_breakpoints:
+                    print("MONITOR: No pending breakpoints to process")
+                    continue
+                    
+                print(f"MONITOR: Current pending breakpoints: {pending_breakpoints}")
+                
+                # Process pending breakpoints for the new entries
+                for entry in new_entries:
+                    name = entry.get('name', '')
+                    addr_str = entry.get('start', '0x0')
+                    file = entry.get('file', 'unknown')
+                    
+                    print(f"MONITOR: Processing new function: '{name}' at {addr_str}")
+                    print(f"MONITOR: Source file: {file}")
+                    
+                    # Check each pending breakpoint pattern
+                    matched = False
+                    for pattern in pending_breakpoints[:]:
+                        print(f"MONITOR: Checking if '{pattern}' matches '{name}'")
+                        if pattern.lower() in name.lower():
+                            print(f"MONITOR: MATCH FOUND: '{pattern}' in '{name}'")
+                            
+                            # Set a breakpoint
+                            try:
+                                addr = int(addr_str, 16) if isinstance(addr_str, str) else addr_str
+                                bp = target.BreakpointCreateByAddress(addr)
+                                if bp.IsValid():
+                                    print(f"MONITOR: SUCCESS: Breakpoint set on function '{name}' at address {addr_str}")
+                                    matched = True
+                                    
+                                    # Remove from pending list if exact match
+                                    if pattern.lower() == name.lower():
+                                        pending_breakpoints.remove(pattern)
+                                        print(f"MONITOR: Removed '{pattern}' from pending list (exact match)")
+                                else:
+                                    print(f"MONITOR: FAILED: Could not set breakpoint on function '{name}' at address {addr_str}")
+                            except Exception as e:
+                                print(f"MONITOR: ERROR: Exception setting breakpoint: {e}")
+                    
+                    if not matched:
+                        print(f"MONITOR: No pending breakpoints matched '{name}'")
+                
+                print("==== MONITOR: Finished processing new JIT functions ====\n")
+                
+            except Exception as e:
+                print(f"MONITOR: Error in monitoring thread: {e}")
+                # Continue running despite errors
+                
+    except Exception as e:
+        print(f"MONITOR: Fatal error in monitoring thread: {e}")
+    
+    print("==== JIT function monitoring thread stopped ====")
+
 def dart_jit_setup(debugger, command, result, internal_dict):
     """
     Setup JIT debugging for the current target
     """
+    global monitoring_enabled, monitor_thread
+    
     # Forward to the plugin's command if it exists, otherwise handle it ourselves
     interpreter = debugger.GetCommandInterpreter()
     cmd_result = lldb.SBCommandReturnObject()
@@ -74,15 +203,92 @@ def dart_jit_setup(debugger, command, result, internal_dict):
                          "Is the target process using the GDB JIT interface?")
             return
         
-        # Make this internal and non-stopping
-        commands = lldb.SBStringList()
-        commands.AppendString("continue")
-        bp.SetCommandLineCommands(commands)
+        # Define a simple callback function (not a class method)
+        def jit_registration_callback(frame, bp_loc, dict):
+            """Callback for JIT code registration breakpoint"""
+            print("\n==== JIT CODE REGISTRATION DETECTED ====")
+            
+            # Check if there are pending breakpoints to process
+            global pending_breakpoints
+            print(f"Current pending breakpoints: {pending_breakpoints}")
+            
+            if not pending_breakpoints:
+                print("No pending breakpoints to process")
+                return False  # Continue execution
+                
+            # Find the process
+            process = frame.GetThread().GetProcess()
+            if not process or not process.IsValid():
+                print("Invalid process in callback")
+                return False
+                
+            # Get all JIT entries to find the latest
+            entries = get_jit_entries(process)
+            if not entries:
+                print("No JIT entries found")
+                return False
+                
+            # The last entry should be the newly registered one
+            latest_entry = entries[-1]
+            name = latest_entry.get('name', 'unknown')
+            file = latest_entry.get('file', 'unknown')
+            addr_str = latest_entry.get('start', '0x0')
+            size = latest_entry.get('size', 0)
+            
+            print(f"New JIT function registered: '{name}' at {addr_str} (size: {size})")
+            print(f"Source file: {file}")
+            
+            # Check if any pending breakpoints match
+            matched = False
+            for pattern in pending_breakpoints[:]:
+                print(f"Checking if '{pattern}' matches '{name}'")
+                if pattern.lower() in name.lower():
+                    print(f"MATCH FOUND: '{pattern}' in '{name}'")
+                    # Set a breakpoint
+                    try:
+                        addr = int(addr_str, 16) if isinstance(addr_str, str) else addr_str
+                        target = process.GetTarget()
+                        bp = target.BreakpointCreateByAddress(addr)
+                        if bp.IsValid():
+                            print(f"SUCCESS: Breakpoint set on function '{name}' at address {addr_str}")
+                            matched = True
+                            # Remove if exact match
+                            if pattern.lower() == name.lower():
+                                pending_breakpoints.remove(pattern)
+                                print(f"Removed '{pattern}' from pending list (exact match)")
+                        else:
+                            print(f"FAILED: Could not set breakpoint on function '{name}' at address {addr_str}")
+                    except Exception as e:
+                        print(f"ERROR: Exception setting breakpoint on function '{name}': {e}")
+            
+            if not matched:
+                print(f"No pending breakpoints matched '{name}'")
+            
+            print("==== JIT CODE REGISTRATION COMPLETED ====\n")
+            return False  # Continue execution
+        
+        # Set the callback function directly
+        bp.SetScriptCallbackFunction("dart_lldb_init.jit_registration_callback")
+        
+        # Store a reference to prevent garbage collection
+        global bp_handler
+        bp_handler = jit_registration_callback
+        
+        # Important: Don't set commands that auto-continue here
+        # Let the callback handle continuation with its return value
+        
+        # Start the background monitoring thread if not already running
+        if not monitoring_enabled:
+            monitoring_enabled = True
+            monitor_thread = threading.Thread(target=monitor_for_new_functions, args=(debugger,))
+            monitor_thread.daemon = True
+            monitor_thread.start()
         
         # Print success message
         print("Dart JIT debugging initialized.")
         print("Run your program with the --gdb-jit-interface flag to enable JIT debug info.")
-        print("Use 'dart-jit list' after execution to see registered functions.")
+        print("You can set pending breakpoints with 'dart-jit pending <function_name>'")
+        print("These will be activated automatically when matching functions are compiled.")
         
         result.SetStatus(lldb.eReturnStatusSuccessFinishResult)
     else:
@@ -279,6 +485,35 @@ def cmd_dart_jit_break(debugger, command, result, internal_dict):
     else:
         result.SetStatus(lldb.eReturnStatusSuccessFinishResult)
 
+def cmd_dart_jit_pending(debugger, command, result, internal_dict):
+    """
+    Set a pending breakpoint for a function that will be JIT compiled in the future
+    """
+    global pending_breakpoints
+    
+    args = command.split()
+    if not args:
+        result.SetError("Please specify a function name or pattern for the pending breakpoint.")
+        return
+    
+    pattern = args[0]
+    
+    # Check if we already have this pattern
+    if pattern in pending_breakpoints:
+        result.AppendMessage(f"Pending breakpoint for '{pattern}' already exists.")
+    else:
+        # Add to our pending list
+        pending_breakpoints.append(pattern)
+        result.AppendMessage(f"Pending breakpoint set for function pattern '{pattern}'.")
+        result.AppendMessage("This breakpoint will be automatically set when a matching function is compiled.")
+    
+    # Show all pending breakpoints
+    result.AppendMessage("\nCurrent pending breakpoints:")
+    for i, p in enumerate(pending_breakpoints):
+        result.AppendMessage(f"{i+1}. {p}")
+    
+    result.SetStatus(lldb.eReturnStatusSuccessFinishResult)
+
 def cmd_dart_jit_help(debugger, command, result, internal_dict):
     """
     Show help for dart-jit commands
@@ -286,24 +521,27 @@ def cmd_dart_jit_help(debugger, command, result, internal_dict):
     result.AppendMessage("""
 Dart JIT Debugging Commands:
 ---------------------------
-dart_jit_setup           - Initialize JIT debugging for current target
-dart-jit list            - List all JIT-compiled functions
-dart-jit break <pattern> - Set a breakpoint in a JIT-compiled function matching pattern
-dart-jit help            - Show this help message
+dart_jit_setup             - Initialize JIT debugging for current target
+dart-jit list              - List all JIT-compiled functions
+dart-jit break <pattern>   - Set a breakpoint in a JIT-compiled function matching pattern
+dart-jit pending <pattern> - Set a pending breakpoint for a function not yet compiled
+dart-jit help              - Show this help message
 
 Usage Example:
   (lldb) dart_jit_setup
+  (lldb) dart-jit pending RunningIsolates.isolateShutdown
   (lldb) run
   (lldb) dart-jit list
   (lldb) dart-jit break myFunction
   
 Workflow for JIT debugging:
 1. Initialize JIT debugging with dart_jit_setup
-2. Run your program with the --gdb-jit-interface flag
-3. Wait for JIT compilation to occur (you'll see RegisterCode messages)
-4. Use Ctrl+C to interrupt execution after RegisterCode messages appear
-5. Use 'dart-jit list' to see available functions
-6. Set breakpoints with 'dart-jit break functionName'
-7. Use 'continue' to resume execution
+2. Set any pending breakpoints with 'dart-jit pending functionName'
+3. Run your program with the --gdb-jit-interface flag
+4. Pending breakpoints will be set automatically when matching functions are compiled
+5. You can also manually interrupt (Ctrl+C) after seeing RegisterCode messages
+6. Use 'dart-jit list' to see available functions
+7. Set additional breakpoints with 'dart-jit break functionName'
+8. Use 'continue' to resume execution
 """)
     result.SetStatus(lldb.eReturnStatusSuccessFinishResult)

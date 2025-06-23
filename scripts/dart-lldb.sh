@@ -27,6 +27,7 @@ echo "Using script: $PYTHON_SCRIPT"
 REMOTE_ARGS=""
 REMOTE_HOST=""
 SYSROOT=""
+PENDING_BREAKPOINTS=""
 ARGS=()
 TARGET_BINARY=""
 
@@ -47,6 +48,30 @@ while [[ $# -gt 0 ]]; do
             fi
             SYSROOT="$2"
             shift 2
+            ;;
+        --pending-breakpoints)
+            if [[ -z "$2" || "$2" == --* ]]; then
+                echo "Error: --pending-breakpoints requires a list of function names separated by semicolons"
+                exit 1
+            fi
+            PENDING_BREAKPOINTS="$2"
+            shift 2
+            ;;
+        --help)
+            echo "Usage: dart-lldb [options] [dart_binary] [dart_args...]"
+            echo ""
+            echo "Options:"
+            echo "  --remote HOST:PORT        Connect to a remote debug server"
+            echo "  --sysroot PATH            Set the sysroot for remote debugging"
+            echo "  --pending-breakpoints LIST Set pending breakpoints for JIT functions"
+            echo "                            (function names separated by semicolons)"
+            echo "  --help                    Show this help message"
+            echo ""
+            echo "Examples:"
+            echo "  dart-lldb ./out/DebugX64/dart --gdb-jit-interface basic.dart"
+            echo "  dart-lldb --pending-breakpoints 'RunningIsolates.isolateShutdown;main' ./out/DebugX64/dart --gdb-jit-interface basic.dart"
+            echo "  dart-lldb --remote localhost:1234 --sysroot /path/to/sysroot ./out/DebugX64/dart"
+            exit 0
             ;;
         *)
             # First non-option is the target binary
@@ -87,6 +112,30 @@ if [ -n "$REMOTE_HOST" ]; then
     # Setup dart JIT debugging with the single command
     REMOTE_ARGS="$REMOTE_ARGS -o \"dart_jit_setup\""
     
+    # For pending breakpoints, we'll add them directly to the global variable
+    if [ -n "$PENDING_BREAKPOINTS" ]; then
+        echo "Setting pending breakpoints for remote debugging: $PENDING_BREAKPOINTS"
+        # Split the pending breakpoints by semicolon
+        IFS=';' read -ra BP_ARRAY <<< "$PENDING_BREAKPOINTS"
+        
+        # Create a Python command to initialize the pending breakpoints list
+        PENDING_INIT="script import os; import sys; sys.path.append(os.path.dirname('/usr/local/bin/dart_lldb_init.py')); import dart_lldb_init; dart_lldb_init.pending_breakpoints = []"
+        REMOTE_ARGS="$REMOTE_ARGS -o \"$PENDING_INIT\""
+        
+        for bp in "${BP_ARRAY[@]}"; do
+            # Trim whitespace
+            bp=$(echo "$bp" | xargs)
+            if [ -n "$bp" ]; then
+                # Add the breakpoint pattern to the global list in the dart_lldb_init module
+                PENDING_CMD="script import dart_lldb_init; dart_lldb_init.pending_breakpoints.append('$bp'); print(f'Added pending breakpoint for: $bp')"
+                REMOTE_ARGS="$REMOTE_ARGS -o \"$PENDING_CMD\""
+            fi
+        done
+        
+        # Print the current list
+        REMOTE_ARGS="$REMOTE_ARGS -o \"script import dart_lldb_init; print(f'Pending breakpoints: {dart_lldb_init.pending_breakpoints}')\""
+    fi
+    
     # Continue the process after setup
     REMOTE_ARGS="$REMOTE_ARGS -o \"process continue\""
 fi
@@ -105,6 +154,30 @@ else
         
         # Add dart_jit_setup to initialize JIT debugging
         LLDB_CMD="$LLDB_CMD -o \"dart_jit_setup\""
+        
+        # For pending breakpoints, we'll add them directly to the global variable
+        if [ -n "$PENDING_BREAKPOINTS" ]; then
+            echo "Setting pending breakpoints: $PENDING_BREAKPOINTS"
+            # Split the pending breakpoints by semicolon
+            IFS=';' read -ra BP_ARRAY <<< "$PENDING_BREAKPOINTS"
+            
+            # Create a Python command to initialize the pending breakpoints list
+            PENDING_INIT="script import os; import sys; sys.path.append(os.path.dirname('/usr/local/bin/dart_lldb_init.py')); import dart_lldb_init; dart_lldb_init.pending_breakpoints = []"
+            LLDB_CMD="$LLDB_CMD -o \"$PENDING_INIT\""
+            
+            for bp in "${BP_ARRAY[@]}"; do
+                # Trim whitespace
+                bp=$(echo "$bp" | xargs)
+                if [ -n "$bp" ]; then
+                    # Add the breakpoint pattern to the global list in the dart_lldb_init module
+                    PENDING_CMD="script import dart_lldb_init; dart_lldb_init.pending_breakpoints.append('$bp'); print(f'Added pending breakpoint for: $bp')"
+                    LLDB_CMD="$LLDB_CMD -o \"$PENDING_CMD\""
+                fi
+            done
+            
+            # Print the current list
+            LLDB_CMD="$LLDB_CMD -o \"script import dart_lldb_init; print(f'Pending breakpoints: {dart_lldb_init.pending_breakpoints}')\""
+        fi
         
         # Set the target arguments
         if [ ${#ARGS[@]} -gt 0 ]; then

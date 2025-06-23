@@ -208,6 +208,77 @@ def dart_jit_setup(debugger, command, result, internal_dict):
             """Callback for JIT code registration breakpoint"""
             print("\n==== JIT CODE REGISTRATION DETECTED ====")
             
+            # Find the process
+            process = frame.GetThread().GetProcess()
+            if not process or not process.IsValid():
+                print("Invalid process in callback")
+                return False
+                
+            # First, read the __jit_debug_descriptor directly
+            # This gives us the latest entry without having to scan all entries
+            descriptor_addr = find_jit_debug_descriptor(process)
+            if not descriptor_addr:
+                print("Could not find __jit_debug_descriptor")
+                return False
+                
+            # Read relevant_entry pointer from descriptor
+            error = lldb.SBError()
+            relevant_entry_addr = process.ReadPointerFromMemory(descriptor_addr + 16, error)  # Offset to relevant_entry
+            if error.Fail() or relevant_entry_addr == 0:
+                print("Could not read relevant_entry from descriptor")
+                return False
+                
+            # Read symfile_addr and symfile_size from the relevant entry
+            symfile_addr = process.ReadPointerFromMemory(relevant_entry_addr + 16, error)  # Offset to symfile_addr
+            if error.Fail() or symfile_addr == 0:
+                print("Could not read symfile_addr from entry")
+                return False
+                
+            symfile_size = process.ReadUnsignedFromMemory(relevant_entry_addr + 24, 8, error)  # Offset to symfile_size
+            if error.Fail() or symfile_size == 0:
+                print("Could not read symfile_size from entry")
+                return False
+                
+            # Read the YAML data directly from memory
+            yaml_data = process.ReadCStringFromMemory(symfile_addr, symfile_size, error)
+            if error.Fail() or not yaml_data:
+                print("Could not read YAML data from memory")
+                return False
+                
+            print(f"DEBUG INFO:\n{yaml_data}")
+                
+            # Parse the YAML data manually to avoid potential parsing issues
+            function_name = "unknown"
+            function_addr = 0
+            function_size = 0
+            source_file = "unknown"
+            
+            for line in yaml_data.splitlines():
+                line = line.strip()
+                if line.startswith("name:"):
+                    function_name = line[5:].strip()
+                elif line.startswith("start:"):
+                    addr_str = line[6:].strip()
+                    try:
+                        function_addr = int(addr_str, 16) if addr_str.startswith("0x") else int(addr_str)
+                    except ValueError:
+                        print(f"Failed to parse address: {addr_str}")
+                        function_addr = 0
+                elif line.startswith("size:"):
+                    try:
+                        function_size = int(line[5:].strip())
+                    except ValueError:
+                        function_size = 0
+                elif line.startswith("file:"):
+                    source_file = line[5:].strip()
+            
+            if function_addr == 0:
+                print("Failed to parse function address from YAML")
+                return False
+                
+            print(f"New JIT function registered: '{function_name}' at 0x{function_addr:x} (size: {function_size})")
+            print(f"Source file: {source_file}")
+            
             # Check if there are pending breakpoints to process
             global pending_breakpoints
             print(f"Current pending breakpoints: {pending_breakpoints}")
@@ -215,54 +286,39 @@ def dart_jit_setup(debugger, command, result, internal_dict):
             if not pending_breakpoints:
                 print("No pending breakpoints to process")
                 return False  # Continue execution
-                
-            # Find the process
-            process = frame.GetThread().GetProcess()
-            if not process or not process.IsValid():
-                print("Invalid process in callback")
-                return False
-                
-            # Get all JIT entries to find the latest
-            entries = get_jit_entries(process)
-            if not entries:
-                print("No JIT entries found")
-                return False
-                
-            # The last entry should be the newly registered one
-            latest_entry = entries[-1]
-            name = latest_entry.get('name', 'unknown')
-            file = latest_entry.get('file', 'unknown')
-            addr_str = latest_entry.get('start', '0x0')
-            size = latest_entry.get('size', 0)
-            
-            print(f"New JIT function registered: '{name}' at {addr_str} (size: {size})")
-            print(f"Source file: {file}")
             
             # Check if any pending breakpoints match
             matched = False
             for pattern in pending_breakpoints[:]:
-                print(f"Checking if '{pattern}' matches '{name}'")
-                if pattern.lower() in name.lower():
-                    print(f"MATCH FOUND: '{pattern}' in '{name}'")
+                print(f"Checking if '{pattern}' matches '{function_name}'")
+                if pattern.lower() in function_name.lower():
+                    print(f"MATCH FOUND: '{pattern}' in '{function_name}'")
                     # Set a breakpoint
                     try:
-                        addr = int(addr_str, 16) if isinstance(addr_str, str) else addr_str
                         target = process.GetTarget()
-                        bp = target.BreakpointCreateByAddress(addr)
+                        
+                        # Create a breakpoint at the function address
+                        bp = target.BreakpointCreateByAddress(function_addr)
+                        
                         if bp.IsValid():
-                            print(f"SUCCESS: Breakpoint set on function '{name}' at address {addr_str}")
+                            print(f"SUCCESS: Breakpoint set on function '{function_name}' at address 0x{function_addr:x}")
+                            bp.SetEnabled(True)
                             matched = True
+                            
+                            # Give the breakpoint a name for easier identification
+                            bp.AddName(f"JIT:{function_name}")
+                            
                             # Remove if exact match
-                            if pattern.lower() == name.lower():
+                            if pattern.lower() == function_name.lower():
                                 pending_breakpoints.remove(pattern)
                                 print(f"Removed '{pattern}' from pending list (exact match)")
                         else:
-                            print(f"FAILED: Could not set breakpoint on function '{name}' at address {addr_str}")
+                            print(f"FAILED: Could not set breakpoint on function '{function_name}' at address 0x{function_addr:x}")
                     except Exception as e:
-                        print(f"ERROR: Exception setting breakpoint on function '{name}': {e}")
+                        print(f"ERROR: Exception setting breakpoint on function '{function_name}': {e}")
             
             if not matched:
-                print(f"No pending breakpoints matched '{name}'")
+                print(f"No pending breakpoints matched '{function_name}'")
             
             print("==== JIT CODE REGISTRATION COMPLETED ====\n")
             return False  # Continue execution

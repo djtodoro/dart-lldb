@@ -112,10 +112,17 @@ else
             for arg in "${ARGS[@]}"; do
                 ARGS_STR="$ARGS_STR \"$arg\""
             done
-            LLDB_CMD="$LLDB_CMD -o \"settings set target.run-args $ARGS_STR\""
+            # Use -- separator for arguments to ensure proper parsing
+            LLDB_CMD="$LLDB_CMD -o \"settings set -- target.run-args $ARGS_STR\""
         fi
         
         # Run the target
+        # Note: When using JIT debugging, you'll need to:
+        # 1. Wait for JIT compilation to occur (watch for RegisterCode messages)
+        # 2. Use Ctrl+C to interrupt execution after RegisterCode messages appear
+        # 3. Run 'dart-jit list' to see available functions
+        # 4. Set breakpoints with 'dart-jit break functionName'
+        # 5. Use 'continue' to resume execution
         LLDB_CMD="$LLDB_CMD -o \"process launch\""
     fi
 fi

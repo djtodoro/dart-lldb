@@ -86,6 +86,18 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+make_watch_cmds () {
+  local list="$1"
+  local cmds=""
+  IFS=';' read -ra BP_ARRAY <<< "$list"
+  for pat in "${BP_ARRAY[@]}"; do
+      pat=$(echo "$pat" | xargs)          # trim
+      [ -z "$pat" ] && continue
+      cmds="$cmds -o \"dart-jit watch $pat\""
+  done
+  echo "$cmds"
+}
+
 # Setup remote debugging if requested
 if [ -n "$REMOTE_HOST" ]; then
     # Set platform and sysroot using the correct approach
@@ -111,31 +123,14 @@ if [ -n "$REMOTE_HOST" ]; then
     
     # Setup dart JIT debugging with the single command
     REMOTE_ARGS="$REMOTE_ARGS -o \"dart_jit_setup\""
-    
+
     # For pending breakpoints, we'll add them directly to the global variable
     if [ -n "$PENDING_BREAKPOINTS" ]; then
-        echo "Setting pending breakpoints for remote debugging: $PENDING_BREAKPOINTS"
-        # Split the pending breakpoints by semicolon
-        IFS=';' read -ra BP_ARRAY <<< "$PENDING_BREAKPOINTS"
-        
-        # Create a Python command to initialize the pending breakpoints list
-        PENDING_INIT="script import os; import sys; sys.path.append(os.path.dirname('/usr/local/bin/dart_lldb_init.py')); import dart_lldb_init; dart_lldb_init.pending_breakpoints = []"
-        REMOTE_ARGS="$REMOTE_ARGS -o \"$PENDING_INIT\""
-        
-        for bp in "${BP_ARRAY[@]}"; do
-            # Trim whitespace
-            bp=$(echo "$bp" | xargs)
-            if [ -n "$bp" ]; then
-                # Add the breakpoint pattern to the global list in the dart_lldb_init module
-                PENDING_CMD="script import dart_lldb_init; dart_lldb_init.pending_breakpoints.append('$bp'); print(f'Added pending breakpoint for: $bp')"
-                REMOTE_ARGS="$REMOTE_ARGS -o \"$PENDING_CMD\""
-            fi
-        done
-        
-        # Print the current list
-        REMOTE_ARGS="$REMOTE_ARGS -o \"script import dart_lldb_init; print(f'Pending breakpoints: {dart_lldb_init.pending_breakpoints}')\""
+        echo "Installing pending breakpoints (remote): $PENDING_BREAKPOINTS"
+        WATCH_CMDS=$(make_watch_cmds "$PENDING_BREAKPOINTS")
+        REMOTE_ARGS="$REMOTE_ARGS $WATCH_CMDS"
     fi
-    
+
     # Continue the process after setup
     REMOTE_ARGS="$REMOTE_ARGS -o \"process continue\""
 fi
@@ -157,28 +152,11 @@ else
         
         # For pending breakpoints, we'll add them directly to the global variable
         if [ -n "$PENDING_BREAKPOINTS" ]; then
-            echo "Setting pending breakpoints: $PENDING_BREAKPOINTS"
-            # Split the pending breakpoints by semicolon
-            IFS=';' read -ra BP_ARRAY <<< "$PENDING_BREAKPOINTS"
-            
-            # Create a Python command to initialize the pending breakpoints list
-            PENDING_INIT="script import os; import sys; sys.path.append(os.path.dirname('/usr/local/bin/dart_lldb_init.py')); import dart_lldb_init; dart_lldb_init.pending_breakpoints = []"
-            LLDB_CMD="$LLDB_CMD -o \"$PENDING_INIT\""
-            
-            for bp in "${BP_ARRAY[@]}"; do
-                # Trim whitespace
-                bp=$(echo "$bp" | xargs)
-                if [ -n "$bp" ]; then
-                    # Add the breakpoint pattern to the global list in the dart_lldb_init module
-                    PENDING_CMD="script import dart_lldb_init; dart_lldb_init.pending_breakpoints.append('$bp'); print(f'Added pending breakpoint for: $bp')"
-                    LLDB_CMD="$LLDB_CMD -o \"$PENDING_CMD\""
-                fi
-            done
-            
-            # Print the current list
-            LLDB_CMD="$LLDB_CMD -o \"script import dart_lldb_init; print(f'Pending breakpoints: {dart_lldb_init.pending_breakpoints}')\""
+            echo "Installing pending breakpoints: $PENDING_BREAKPOINTS"
+            WATCH_CMDS=$(make_watch_cmds "$PENDING_BREAKPOINTS")
+            LLDB_CMD="$LLDB_CMD $WATCH_CMDS"
         fi
-        
+
         # Set the target arguments
         if [ ${#ARGS[@]} -gt 0 ]; then
             ARGS_STR=""

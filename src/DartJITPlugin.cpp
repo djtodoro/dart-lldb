@@ -11,6 +11,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <cinttypes>
 
@@ -21,6 +22,22 @@ static std::mutex g_jit_mutex;
 static std::unordered_map<uint64_t, std::string> g_jit_functions;
 static std::unordered_map<uint64_t, std::string> g_jit_files;
 static std::unordered_map<uint64_t, uint64_t> g_jit_sizes;
+
+static std::vector<std::string>           g_pending_patterns;
+static std::unordered_set<lldb::addr_t>   g_active_bp_addrs;
+
+// Helper: did we already add a bp at this address?
+static bool AlreadyPatched(lldb::addr_t addr) {
+  return g_active_bp_addrs.find(addr) != g_active_bp_addrs.end();
+}
+
+// Helper: does a function name match any pending pattern?
+static bool MatchesPending(const std::string &fn) {
+  for (const auto &pat : g_pending_patterns)
+    if (fn.find(pat) != std::string::npos)
+      return true;
+  return false;
+}
 
 // Command to list all JIT-compiled functions
 class DartJITListCommand : public SBCommandPluginInterface {
@@ -344,7 +361,13 @@ bool BreakpointCallback(void* baton,
             << "' at 0x" << std::hex << code_addr 
             << " (size: " << std::dec << code_size << " bytes, file: " << source_file << ")" 
             << std::endl;
-  
+
+  if (MatchesPending(func_name) && !g_active_bp_addrs.count(code_addr)) {
+      SBBreakpoint bp = target.BreakpointCreateByAddress(code_addr);
+      if (bp.IsValid())
+          g_active_bp_addrs.insert(code_addr);
+  }
+
   return false; // Continue execution
 }
 
@@ -357,7 +380,8 @@ public:
       result.AppendMessage("Dart JIT debugger plugin commands:\n"
                           "  dart-jit list   - List all JIT-compiled functions\n"
                           "  dart-jit break  - Set a breakpoint in a JIT-compiled function\n"
-                          "  dart-jit add    - Manually add a JIT function (for testing)\n");
+                          "  dart-jit add    - Manually add a JIT function (for testing)\n"
+                          "  dart-jit watch  - Add breakpoint to a func_name in advance\n");
       result.SetStatus(eReturnStatusSuccessFinishNoResult);
       return true;
     }
@@ -419,6 +443,43 @@ public:
   }
 };
 
+class DartJITWatchCommand : public SBCommandPluginInterface {
+public:
+  bool DoExecute(SBDebugger dbg,
+                 char **cmd,
+                 SBCommandReturnObject &res) override {
+
+    // No arguments?  Print usage.
+    if (!cmd || !cmd[0]) {
+      res.AppendMessage(
+          "Usage: dart-jit watch <pattern> [more patterns…]\n"
+          "Adds substring pattern(s) to the list of names that will\n"
+          "automatically receive a breakpoint the first time the JIT\n"
+          "registers them.");
+      res.SetStatus(eReturnStatusFailed);
+      return false;
+    }
+
+    // Push every argument into the global vector
+    size_t added = 0;
+    while (*cmd) {
+      std::string pat = *cmd++;
+      if (!pat.empty()) {
+        g_pending_patterns.push_back(pat);
+        ++added;
+      }
+    }
+
+    std::ostringstream msg;
+    msg << "Added " << added << " pattern"
+        << (added == 1 ? "" : "s")
+        << " to pending-breakpoint watch list.";
+    res.AppendMessage(msg.str().c_str());
+    res.SetStatus(eReturnStatusSuccessFinishResult);
+    return true;
+  }
+};
+
 // Plugin initialization function
 namespace lldb {
 bool PluginInitialize(SBDebugger debugger) {
@@ -435,8 +496,10 @@ bool PluginInitialize(SBDebugger debugger) {
                       "Set a breakpoint in a JIT-compiled Dart function", nullptr);
     dartjit.AddCommand("add", new DartJITAddCommand(),
                       "Manually add a JIT function (for testing)", nullptr);
+    dartjit.AddCommand("watch", new DartJITWatchCommand(),
+                       "Add pattern(s) for automatic breakpoints", nullptr);
   }
-  
+
   // Add only dart_jit_setup command for simplicity
   interpreter.AddCommand("dart_jit_setup", new DartJITSetupCommand(),
                         "Set up Dart JIT debugging in the current target", nullptr);

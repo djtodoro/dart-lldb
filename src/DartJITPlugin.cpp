@@ -14,6 +14,8 @@
 #include <unordered_set>
 #include <vector>
 #include <cinttypes>
+#include <algorithm>
+#include <cctype>
 
 using namespace lldb;
 
@@ -33,9 +35,19 @@ static bool AlreadyPatched(lldb::addr_t addr) {
 
 // Helper: does a function name match any pending pattern?
 static bool MatchesPending(const std::string &fn) {
-  for (const auto &pat : g_pending_patterns)
-    if (fn.find(pat) != std::string::npos)
+  // Convert function name to lowercase for case-insensitive matching
+  std::string fn_lower = fn;
+  std::transform(fn_lower.begin(), fn_lower.end(), fn_lower.begin(), ::tolower);
+  
+  for (const auto &pat : g_pending_patterns) {
+    // Convert pattern to lowercase for case-insensitive matching
+    std::string pat_lower = pat;
+    std::transform(pat_lower.begin(), pat_lower.end(), pat_lower.begin(), ::tolower);
+    
+    if (fn_lower.find(pat_lower) != std::string::npos) {
       return true;
+    }
+  }
   return false;
 }
 
@@ -198,9 +210,7 @@ public:
       SBAddress addr_obj = target.ResolveLoadAddress(addr);
       if (addr_obj.IsValid()) {
         // Unfortunately we can't easily add symbols in LLDB API
-        // Just log the info and use the data structures we maintain
-        std::cout << "Adding symbol for " << name << " at 0x" 
-                  << std::hex << addr << std::dec << std::endl;
+        // Just use the data structures we maintain
       }
     }
     
@@ -270,6 +280,7 @@ bool BreakpointCallback(void* baton,
                        lldb::SBBreakpointLocation& location) {
   // This is called when we hit __jit_debug_register_code
   
+  
   // Find the __jit_debug_descriptor symbol to get the JIT entry
   SBTarget target = process.GetTarget();
   
@@ -332,6 +343,7 @@ bool BreakpointCallback(void* baton,
   std::string yaml(buffer, symfile_size);
   delete[] buffer;
   
+  
   // Parse the YAML data
   uint64_t code_addr = 0;
   uint64_t code_size = 0;
@@ -344,15 +356,20 @@ bool BreakpointCallback(void* baton,
   }
   
   // Store the information
+  bool already_registered = false;
   {
     std::lock_guard<std::mutex> lock(g_jit_mutex);
+    already_registered = g_jit_functions.count(code_addr) > 0;
     g_jit_functions[code_addr] = func_name;
     g_jit_files[code_addr] = source_file;
     g_jit_sizes[code_addr] = code_size;
   }
   
-  // Unfortunately we can't easily add symbols in LLDB API
-  // Just log the info and use the data structures we maintain
+  // Skip duplicate registrations
+  if (already_registered) {
+    return false;
+  }
+  
   std::cout << "Registered symbol for function " << func_name 
             << " at 0x" << std::hex << code_addr 
             << " size: " << std::dec << code_size << std::endl;
@@ -363,9 +380,20 @@ bool BreakpointCallback(void* baton,
             << std::endl;
 
   if (MatchesPending(func_name) && !g_active_bp_addrs.count(code_addr)) {
-      SBBreakpoint bp = target.BreakpointCreateByAddress(code_addr);
-      if (bp.IsValid())
+      // Get the debugger from the target
+      SBDebugger debugger = target.GetDebugger();
+      SBCommandInterpreter interpreter = debugger.GetCommandInterpreter();
+      SBCommandReturnObject cmd_result;
+      
+      // Try using LLDB command to set the breakpoint
+      std::stringstream cmd;
+      cmd << "breakpoint set --address 0x" << std::hex << code_addr;
+      
+      interpreter.HandleCommand(cmd.str().c_str(), cmd_result);
+      
+      if (cmd_result.Succeeded()) {
           g_active_bp_addrs.insert(code_addr);
+      }
   }
 
   return false; // Continue execution
@@ -426,11 +454,15 @@ public:
       return false;
     }
     
-    // Make this internal and non-stopping
-    SBStringList commands;
-    commands.AppendString("continue");
-    bp.SetCommandLineCommands(commands);
+    // Set the callback without the continue command
     bp.SetCallback(BreakpointCallback, nullptr);
+    // Make it internal so it doesn't show in breakpoint list
+    bp.SetOneShot(false);
+    bp.SetAutoContinue(true);
+    bp.AddName("__lldb_internal_jit_monitor");
+    
+    // Try to make it truly internal (might not be supported in all LLDB versions)
+    // bp.SetInternal(true);  // This method might not exist
     
     std::stringstream ss;
     ss << "Dart JIT debugging enabled. "
@@ -504,8 +536,6 @@ bool PluginInitialize(SBDebugger debugger) {
   interpreter.AddCommand("dart_jit_setup", new DartJITSetupCommand(),
                         "Set up Dart JIT debugging in the current target", nullptr);
   
-  std::cout << "Dart JIT debugging plugin loaded." << std::endl;
-  std::cout << "Use 'dart_jit_setup' after loading your target to enable JIT debugging." << std::endl;
   
   return true;
 }

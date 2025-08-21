@@ -2,6 +2,8 @@
 
 This plugin enables debugging of JIT-compiled Dart code using LLDB. It integrates with Dart's internal JIT system to provide source-level debugging for dynamically generated code.
 
+<img width="837" height="777" alt="dart-lldb" src="https://github.com/user-attachments/assets/a1479288-9ea0-4676-ba69-96f774ad349d" />
+
 ## Building
 
 ### Prerequisites

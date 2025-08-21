@@ -10,6 +10,8 @@ This plugin enables debugging of JIT-compiled Dart code using LLDB. It integrate
 - LLDB development libraries
 - C++ compiler with C++17 support
 
+#### Linux
+
 ```bash
 # Install LLVM/LLDB development packages
 echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-19 main" | sudo tee /etc/apt/sources.list.d/llvm.list
@@ -24,13 +26,40 @@ cd /usr/bin
 sudo ln -S ./lldb ../lib/llvm-19/bin/lldb
 ```
 
+#### MacOS
+
+Download LLVM package with `brew`:
+
+```
+$ brew install llvm@19
+$ pip install pyyaml
+```
+
+Build `lldb` from source, since there is no package available.
+
+```
+$ wget https://github.com/llvm/llvm-project/archive/refs/tags/llvmorg-19.1.7.zip
+$ unzip llvmorg-19.1.7.zip
+$ cd llvm-project-llvmorg-19.1.7/ && mkdir build_lldb && cd build_lldb
+$ cmake ../llvm -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_PROJECTS="clang;lldb" -DLLVM_ENABLE_ASSERTIONS=ON -DLLDB_INCLUDE_TESTS=OFF -DLLDB_ENABLE_PYTHON=1 -GNinja
+$ ninja
+```
+
 ### Build steps
+
+#### Linux
 
 ```bash
 mkdir build
 cd build
 cmake -DCMAKE_BUILD_TYPE=Release -GNinja ..
 ninja
+```
+
+#### MacOS (a bit more complex ATM - will simplify this)
+
+```bash
+$ cmake -GNinja .. -DLLVM_DIR=/opt/homebrew/opt/llvm@19/lib/cmake/llvm -DLLVM_BUILD_ROOT=/path/to/llvm-project-llvmorg-19.1.7/build_lldb -DLLVM_SRC=/path/to/llvm-project-llvmorg-19.1.7/ -DLLVM_TABLEGEN_EXE=/opt/homebrew/opt/llvm@19/bin/llvm-tblgen -DCMAKE_CXX_FLAGS="-Wno-deprecated-declarations"
 ```
 
 ### Installation (optional)
